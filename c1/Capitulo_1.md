@@ -1,3 +1,5 @@
+# Capitulo 1 
+
 ## Configurando o seu ambiente Python 
 
 Inicialmente, o autor apresenta uma ideia de máquina virtual do Kali Linux (distro voltada para segurança) e introduz ideias de como configurar sua máquina para estudar o livro.
