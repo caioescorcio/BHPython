@@ -56,25 +56,42 @@ E, para atestar que foi corretamente instalada:
 
 Como o Python é uma linguagem interpretada, é possível executar comando nele dinamicamente, como o que acontece no código acima. Nele, o comando `python` é chamado e, com a interface de código (`>>> `), são executados comandos. O primeiro comando (`from lxml import etree`) tenta fazer um `import` da biblioteca instalda agora há pouco e, logo em seguida, sai do programa. Se houvesse um erro na instalação, o terminal do Python quebraria.
 
-Na pasta-mãe do repositório tem um `.bat` que cria no diretório atual um venv. Ele será usado para o início de cada capítulo:
+Na pasta-mãe do repositório tem um `.bat` que cria no diretório atual um venv. Ele será usado para o início de cada capítulo. Execute-o diretamente no terminal `cmd` na pasta-mãe do repositório:
 
 ```bat
 @echo off
-:: Cria a pasta 'codigos'
+setlocal enabledelayedexpansion
+
+rem Encontra a maior pasta cX
+set max=0
+for /d %%d in (c*) do (
+    set name=%%~nxd
+    if "!name:~0,1!" == "c" (
+        set num=!name:~1!
+        if !num! gtr !max! (
+            set max=!num!
+        )
+    )
+)
+
+rem Incrementa X e cria a nova pasta e arquivo
+set /a new_num=max+1
+set new_folder=c%new_num%
+md "!new_folder!"
+echo # Capitulo %new_num% > "!new_folder!\Capitulo_%new_num%.md"
+
+rem Executa os comandos na nova pasta
+cd "!new_folder!"
 mkdir codigos
-
-:: Navega para a pasta criada
 cd codigos
-
-:: Cria um ambiente virtual Python chamado 'venv3'
 python -m venv venv3
+call .\venv3\Scripts\activate.bat
 
-:: Ativa o ambiente virtual
-call venv3\Scripts\activate.bat
+endlocal
 
-:: Exibe uma mensagem informando que o ambiente foi ativado
-echo Ambiente virtual 'venv3' ativado!
 ```
+
+Não entrarei em detalhes do funcionamento do código pois: 1, ele foi feito pelo Copilot; 2, este é um estudo de Python.
 
 ### Instalando um IDE
 
