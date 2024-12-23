@@ -8,7 +8,7 @@ Em cada capítulo ou subcapítulo existirão pastas que abordarão conceitos e m
   |- \c1
     |- \codigos
     |- Capitulo_1.md
-  |- c2
+  |- \c2
     |- \codigos
     |- Capitulo_2.md
 ```
