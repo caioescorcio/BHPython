@@ -380,3 +380,224 @@ def handle(self, client_socket):
 
 Pronto, agora com o NetCat funcional, serão feitos alguns testes! ATENÇÃO, NÃO É UM TELNET
 
+### Criando um proxy TCP
+
+O que é um proxy? Um proxy é um interceptador de comunicação de pacotes. Essencialmente ele deve ser capaz de:
+
+1. Interceptar comunicação (mostrar ao usuário)
+2. Modificar o pacote à maneira desejada
+3. Gerencia direncionamento de tráfego
+
+Inicialmente, aborda-se a função `hexdump`, para exibir a comunicação acontecendo. Primeiramente criamos um filtro chamado `HEX_FILTER`:
+
+```py
+HEX_FILTER = ''.join([chr(i) if len(repr(chr(i))) == 3 else '.' for i in range(256)])
+```
+
+Esse filtro funciona da seguinte maneira:
+
+- Primeiramente, `''.join()` concatena todos as passagens de uma determinada lista para uma string:
+    - Exemplo: 
+    ```py
+        lista = ['a', 'b', 'c']
+        resultado = '-'.join(lista)
+        print(resultado)  # Saída: 'a-b-c'
+    ```
+- O racional por trás do filtro é:
+    - Convertendo um número de 0 a 256 (`i in range(256)`, que são representações dos caracteres ASCII), se, 
+        - ao vermos o caractere correspondente (`chr(i)`, ex: `chr(97)` = `a`) e analisarmos a sua representação (`repr()`, ex: `repr(a)` = `'a'`, `repr(\n)` = `'\\n'`), 
+        - se ele tiver tamanho 3 (`len() == 3`, ex: `'a'` tem `'`, `a` e `'` = 3,  `'\\n'` tem `'`, `\`, `n` e `'` = 4,), 
+        
+    Ele é um caractere "printável" como letra/número/símbolo (não EOF ou ENTER). Caso ele seja printável, printa o próprio caractere, se não, printa `.`
+
+Isso assegura que seja possível ler de maneira "segura" todos os caracteres de uma string.
+
+Em seguida, criando a função `hexdump`:
+
+```py
+# Recebe uma mensagem, o comprimento dela de hexadecimal (16) e a opção de mostrar
+def hexdump(src, length=16, show=True):
+    # Caso a mensagem esteja em bytes, ela é decodada
+    if isinstance(src,bytes):
+        src = src.decode()
+
+    # Cria uma lista para iterar a mensagem em várias linhas
+    results = list()
+
+    # Para o tamanho da mensagem dada 
+    # range (start, stop, step) significa que até o completar o tamanho de `src` (stop), 
+    # i vai pular de `length` em `length`
+    for i in range(0, len(src), length):
+        # palavra é vista em seus `length` de tamanho
+        word = str(src[i:i+length])
+
+        # a palavra é filtrada para caracteres printáveis
+        printable = word.translate(HEX_FILTER)
+        # ord(c) converte um char para o seu ASCII, :X transforma o ASCII em Hexa
+        # e 02 faz com que seja um caractere de 2 dígitos
+        hexa = ' '.join([f'{ord(c):02X}' for c in word])
+        # O comprimento do hexa é multiplicado por 3, para que haja espaço 'XX ', os numeros hexa mais espaço
+        hexwidth = length*3
+        # gera uma linha com o índice i em hexa de 4 digitos, o hexa (com alinhamento para esquerda <) e a string printavel convertida
+        results.append(f'{i:04x}    {hexa:<{hexwidth}}  {printable}')
+    
+    if show:
+        for line in results:
+            # Printa os resultados
+            print(line)
+    else:
+        return results
+```
+
+Agora faremos o que, de fato, fará a conexão entre hosts (`recieve_from`):
+
+```py
+# Recebe um socket
+def recieve_from(connection):
+    buffer = b""
+    # Gera um timeout
+    connection.settimeout(5)
+
+    # Tenta receber até que não hajam mais dados
+    try:
+        while True:
+            data = connection.recv(4096)
+            if not data:
+                break
+            buffer += data
+
+    except Exception as e:
+        pass
+    
+    return buffer
+```
+
+Para a modificação de pacotes da conexão são abstraídas duas funções para modificar pacotes:
+
+```py
+# Podem ser usadas eventualmente
+def request_handler(buffer):
+    return buffer
+def response_handler(buffer):
+    return buffer
+```
+
+Agora, criaremos o proxy em si:
+
+```py
+# Recebe o socket do cliente ("local") e os dados da conexão remota
+def proxy_handler(client_socket, 
+                  remote_host, remote_port,
+                  recieve_first): # recieve_first é para casos que a primeira mensagem já seja uma resposta
+    
+    # Cria conexão
+    remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    remote_socket.connect((remote_host,remote_port))
+
+    # Recebe a primeira conexão, printa e passa ao eventual handler dela
+    if recieve_first:
+        remote_buffer = recieve_from(remote_socket)
+        hexdump(remote_buffer)
+    
+        remote_buffer = response_handler(remote_buffer)
+
+        # Envia o novo buffer
+        if len(remote_buffer):
+            print("[<==] Enviando %d bytes para o localhost" % len(remote_buffer))
+            client_socket.send(remote_buffer)
+
+    # Loop de conexão com o host remoto
+    while True:
+        local_buffer = recieve_from(client_socket)
+        if len(local_buffer):
+            line = "[==>] Recebidos %d bytes do localhost" % len(local_buffer)
+            print(line)
+            hexdump(local_buffer)
+        
+        remote_buffer = recieve_from(remote_socket)
+
+        if len(remote_buffer):
+            print("[<==] Enviando %d bytes para o localhost" % len(remote_buffer))
+            hexdump(remote_buffer)
+
+            remote_buffer = response_handler(remote_buffer)
+            client_socket.send(remote_buffer)
+            print("[<==] Enviado para o localhost")
+
+        # Sem respostas, fecha as conexões
+        if not len(local_buffer) or not len(remote_buffer):
+            client_socket.close()
+            remote_socket.close()
+            print("[*] Não há mais dados. Fechando conexões")
+            break
+```
+
+O próximo passo agora é criar o loop do servidor, ou seja, uma forma de criar o socket local, escutá-lo e, enfim, fazer o proxy:
+
+```py
+def server_loop(local_host, local_port,
+                remote_host, remote_port,
+                recieve_first):
+    
+    # Inicia o socket do servidor
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    
+    try:
+        # Cria uma conexão com o localhost
+        server.bind((local_host,local_port))
+    except Exception as e:
+        print("Problema ao conectar: %r" % e)
+        print("[!!] Falha ao ouvir em %s:%d" % (local_host,local_port))
+        print("[!!] Verifique outros sockets de escuta ou corrija as permissões")
+        sys.exit(0)
+    
+    print("[*] Ouvindo em %s:%d" % (local_host,local_port))
+    server.listen(5)
+    while True:
+        # Inicia a escuta do localhost, determinando qual o endereço ele está comunicando, para usar seu socket
+        client_socket, addr = server.accept()
+        line = "> Conexão de entrada recebida de %s:%d" % (addr[1],addr[0])
+        print(line)
+
+        # Inicia a thread com os argumentos passados
+        proxy_thread = threading.Thread(
+            target=proxy_handler,
+                   args=(client_socket, remote_host, remote_port, recieve_first)
+                    )
+        proxy_thread.start()
+```
+
+Finalmente, cria-se a `main()` para executar o proxy:
+
+```py    
+def main():
+    # Strings de instrução de uso. O código só é executado quando todos os argumentos são preenchidos
+    if len(sys.argv[1:]) != 5:
+        print("Uso: ./proxy.py [localhost] [localport]", end='')
+        print(" [remotehost] [remoteport] [recieve_first]")
+        print("Exemplo: ./proxy.py 127.0.0.1 9000 10.12.132.1 9000 True")
+
+    # Define as variáveis
+    local_host = sys.argv[1]
+    local_port = int(sys.argv[2])
+
+    remote_host = sys.argv[3]
+    remote_port = int(sys.argv[4])
+
+    recieve_first = sys.argv[5]
+
+    if 'True' in recieve_first:
+        recieve_first = True
+    else:
+        recieve_first = False
+    # Executa o loop
+    server_loop(local_host, local_port, remote_host, remote_port, recieve_first)
+
+if __name__ == '__main__':
+    main()
+```
+
+### Explorando o código
+
+Para testar, podemos usar um `curl -x 127.0.0.1:9000 www.google.com` com um `python3 proxy.py 127.0.0.1 9000 www.google.com 80 False`
+
