@@ -234,7 +234,7 @@ if __name__ == '__main__':
     # Define tipos e valor padrão
     parser.add_argument('-p', '--port', type=int, default=5555, help='porta especificada')
     parser.add_argument('-t', '--target', default='192.168.1.203', help='IP alvo')
-    parser.add_argument('-u', '--upload', help='fazer upload de arquivo')
+    parser.add_argument('-u', '--upload', help='receber um upload de arquivo')
 
     # args é um array que armazena os argumentos usado
     args = parser.parse_args()
@@ -272,3 +272,111 @@ class NetCat:
         # caso contrário, executa a função send()
             self.send()
 ```
+
+
+Criando o método `send()`, usaremos o mesmo princípio do cliente TCP:
+
+```py
+    def send(self):
+        # Cria a conexão do socket
+        self.socket.connect(self.args.target, self.args.port)
+        if self.buffer:
+            # Se houver mensagens no buffer inicial, envia
+            self.socket.send(self.buffer)
+        
+        try:
+            while True:
+                recv_len = 1
+                response = ''
+                while recv_len:
+                    # Recebe uma resposta
+                    data = self.socket.recv(5)
+                    recv_len = len(data)
+                    response += data.decode()
+                    # Quando finalizar a resposta, acaba
+                    if recv_len < 5:
+                        break
+                # Responde ao usuário
+                if response:
+                    print(response)
+                    buffer = input('> ')
+                    buffer += '\n'
+                    self.socket.send(buffer.encode())
+                    
+        # O loop de conversa continua até o usuário interromper
+        except KeyboardInterrupt:
+            print("Interrompido pelo usuário")
+            self.socket.close()
+            sys.exit()
+```
+
+Para a função `listen()`:
+
+```py
+    def listen (self):
+        # Assim como no cliente, o bind é feito para a escuta
+        self.socket.bind((self.args.target, self.args.port))
+        # Escuta no máximo até 5 conexões
+        self.socket.listen(5)
+        while True:
+            # Ao receber uma conexão, retorna um socket conectado
+            client_socket, _ = self.socket.accept()
+            # Usa o handle para executar as mensagens
+            client_thread = threading.Thread(
+                target=self.handle, args=(client_socket,)
+            )
+            client_thread.start()
+```
+
+Vale ressaltar que a função `handle()` que será feita em seguida, serve para o uso geral das demais funções do NetCat:
+
+- `execute`: Envia o output da execução do comando usado como argumento para o target
+- `upload`: Coloca tudo o que está sendo escutado do alvo em um arquivo
+- `command`: Permite que, com a conexão feita, o target execute comandos da máquina dele para a do usuário
+
+```py
+def handle(self, client_socket):
+        if self.args.execute:
+            # Executa o comando e envia o output para o target
+            output = execute(self.args.execute)
+            client_socket.send(output.encode())
+        
+        if self.args.upload:
+            file_buffer = b''
+            while True:
+                # Espera as mensagens 
+                data = client_socket.recv(20)
+                file_buffer += data
+                if len(data) < 20:
+                    break
+            # Salva o que foi recebido em um arquivo e o que for escrito será interpretado como bytes (wb), 
+            # por isso não é feito o decode
+            with open(self.args.upload, 'wb') as f:
+                f.write(file_buffer)
+            message = f'Upload salvo em {self.args.upload}'
+            client_socket.send(message.encode())
+
+        if self.args.command:
+            cmd_buffer = b''
+            while True:
+                try:
+                    # Espera os comandos do alvo 
+                    client_socket.send(b'cmd: #> ')
+                    while '\n' not in cmd_buffer.decode():
+                        cmd_buffer += client_socket.recv(64)
+                    # Executa
+                    response = execute(cmd_buffer.decode())
+                    if response:
+                        client_socket.send(response.decode())
+                    cmd_buffer = b''
+
+                except Exception as e:
+                    print(f'Servidor encerrado: {e}')
+                    self.socket.close()
+                    sys.exit()
+```
+
+### Explorando o código
+
+Pronto, agora com o NetCat funcional, serão feitos alguns testes! ATENÇÃO, NÃO É UM TELNET
+
