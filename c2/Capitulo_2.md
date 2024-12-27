@@ -790,9 +790,142 @@ Algumas observações:
     - O uso de um `paramiko.util.log_to_file('paramiko.log')` pode ser útil para debug
 
 Agora, finalmente, criaremos uma nova sesssão e um novo server:
-    - O server deve ser executado no host atual
+    - O server deve ser executado no host atual, que executará comandos na máquina alvo
     - A sessão deve ser executada na máquina-alvo
 
 ### Explorando o código
 
 Tudo foi testado com os códigos feitos!
+
+### Tunelamento SSH
+
+Nesse último trecho do capítulo, faremos um tunelamento SSH, que nada mais é que um encaminhamento de SSH através de uma máquina para outra:
+
+![SSH](../imagens/mysql-tunel-ssh-ok.png)
+
+Observe que, na imagem, o usuário não tem acesso direto ao servidor (base de dados). Contudo, ao fazer um túnel, acessaremos o SSH de uma máquina na rede local e, através dela, conectaremos ao servidor.
+
+À priori, chega a ser difícil a aplicabilidade do tunelamento SSH direto, como na imagem, uma vez que os clientes Windows geralmente apresentam por padrão um cliente SSH rodando. Contudo, o código que estudaremos é um tunelamneto reverso, que, na verdade, faz com que o próprio cliente tente se conectar com a nossa máquina, criando uma "ponte" na rede.
+
+Para começarmos, pegaremos um arquivo chamado `rforward.py`, da própria biblioteca do Paramiko, e o entenderemos.
+
+Na função `main()`:
+
+```py
+def main():
+    # Captura os dados colocados pelo parser
+    options, server, remote = parse_options()
+
+    # Captura uma senha
+    password = None
+    if options.readpass:
+        password = getpass.getpass("Enter SSH password: ")
+
+    # Inicia o cliente SSH
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.WarningPolicy())
+
+    verbose("Connecting to ssh host %s:%d ..." % (server[0], server[1]))
+    try:
+        # Conexão feita através das opções dadas
+        client.connect(
+            server[0],
+            server[1],
+            username=options.user,
+            key_filename=options.keyfile,
+            look_for_keys=options.look_for_keys,
+            password=password,
+        )
+    except Exception as e:
+        print("*** Failed to connect to %s:%d: %r" % (server[0], server[1], e))
+        sys.exit(1)
+
+    verbose(
+        "Now forwarding remote port %d to %s:%d ..."
+        % (options.port, remote[0], remote[1])
+    )
+
+    try:
+        # Chama a função de reverse foward, passando as configurações de conexão e a camada de transporte do cliente
+        reverse_forward_tunnel(
+            options.port, remote[0], remote[1], client.get_transport()
+        )
+    except KeyboardInterrupt:
+        print("C-c: Port forwarding stopped.")
+        sys.exit(0)
+```
+
+Agora, na função `reverse_forward_tunnel()`:
+
+```py
+
+def reverse_forward_tunnel(server_port, remote_host, remote_port, transport):
+    # Na camada de transporte do cliente, ele chama a função de port foward (que em si envia o tráfego)
+    # Ela é responsável por criar esse canal entre a porta do servidor com um possível host
+    transport.request_port_forward("", server_port)
+    while True:
+        chan = transport.accept(1000)
+        if chan is None:
+            continue
+        # Na Thread de execução, é chamado o handler que irá conectar, de fato, com o host remoto
+        thr = threading.Thread(
+            target=handler, args=(chan, remote_host, remote_port)
+        )
+        thr.setDaemon(True)
+        thr.start()
+```
+
+Para fechar, na função `handler()`:
+
+```py
+
+def handler(chan, host, port):
+    sock = socket.socket()
+    try:
+        # Cria um socket para o host alvo
+        sock.connect((host, port))
+    except Exception as e:
+        verbose("Forwarding request to %s:%d failed: %r" % (host, port, e))
+        return
+
+    verbose(
+        "Connected!  Tunnel open %r -> %r -> %r"
+        % (chan.origin_addr, chan.getpeername(), (host, port))
+    )
+    while True:
+        # Este trecho de select funciona da seguinte forma: 
+        # readable, writable, exceptional = select.select(read_list, write_list, except_list[, timeout])
+        # Ele basicamente verifica se os dados de sock e chan estão prontos para leitura, já que estão na variável
+        # 'READABLE`
+
+        r, w, x = select.select([sock, chan], [], [])
+        # Encaminha os dados de um para o outro, verificando se o socket está pronto para leitura
+        if sock in r:
+            # Recebe os dados do socket (que é o host remoto)
+            data = sock.recv(1024)
+            if len(data) == 0:
+                break
+            # Encaminha para o nosso channel (camada de transporte do SSH, que é o servidor)
+            chan.send(data)
+        if chan in r:
+            # Recebe dados do channel (vindos do servidor)
+            data = chan.recv(1024)
+            if len(data) == 0:
+                break
+            # Envia para o socket
+            sock.send(data)
+    chan.close()
+    sock.close()
+    verbose("Tunnel closed from %r" % (chan.origin_addr,))
+```
+
+Para usá-lo, deve-se conectar na máquina Windows, mirando no host remoto para o cliente SSH e, por fim, no servidor desejado como server.
+
+### Explorando o código
+
+Excepcionalmente, confiei nos testes do livro pois estava sem tempo para testar, já que o código é do próprio Paramiko.
+
+## FIM
+
+Agora com o Capítulo 2 em mãos, é notável que as ferramentas desenvolvidas são muito úteis quando se trata de redes para segurança. Nos próximos capítulos serão abordados tópicos mais complexos mas, com certeza, os desse capítulo vêm a agregar.
