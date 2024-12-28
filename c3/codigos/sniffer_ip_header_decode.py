@@ -30,6 +30,15 @@ class IP:
         except Exception as e:
             print("%s Sem protocolo para %s" % (e, self.protocol_num))
             self.protocol = str(self.protocol_num)
+
+class ICMP:
+    def __init__(self, buff):
+        header = struct.unpack('<BBHHH', buff)
+        self.type = header[0]
+        self.code = header[1]
+        self.sum = header[2]
+        self.id = header[3]
+        self.seq = header[4]
             
 def sniff(host):
     if os.name == 'nt':
@@ -50,9 +59,18 @@ def sniff(host):
         while True:
             raw_buffer = sniffer.recvfrom(65535)[0]
             ip_header = IP(raw_buffer[0:20])
-            print("Protocolo: %s %s -> %s" % (ip_header.protocol, 
-                                                ip_header.src_address,
-                                                ip_header.dst_address))
+            if ip_header.protocol == 'ICMP':
+                print("Protocolo: %s %s -> %s" % (ip_header.protocol, 
+                                                    ip_header.src_address,
+                                                    ip_header.dst_address))
+                print(f'Versão: {ip_header.ver}')
+                print(f'Comprimento do cabeçalho: {ip_header.ihl} TTL: {ip_header.ttl}')
+                
+                offset = ip_header.ihl * 4
+                buff = raw_buffer[offset:offset + 8]
+                icmp_header = ICMP(buff)
+                print('ICMP -> Tipo: %s Código: %s\n' % (icmp_header.type, 
+                                                         icmp_header.code))
 
     except KeyboardInterrupt:
         
