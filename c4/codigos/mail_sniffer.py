@@ -8,7 +8,7 @@ def packet_callback(packet):
             print(f'[*] {mypacket}')
     
 def main():
-    sniff(filter='tcp port 80',
+    sniff(filter='tcp port 110 or tcp port 25 or tcp port 143',
           prn=packet_callback, store=0)
 
 if __name__ == '__main__':
