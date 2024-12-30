@@ -393,9 +393,19 @@ if __name__ == '__main__':
 
 Caso exista ainda alguma dúvida de como esse envenenamento funciona, aqui está uma analogia feita pelo ChatGPT:
 
-`Imagine que você está em uma festa cheia de pessoas que não se conhecem bem, e alguém resolve bancar o "anfitrião enganador". Esse anfitrião começa a distribuir informações erradas sobre quem é quem na festa. Para uma pessoa, ele diz: "O fulano ali, que você está tentando encontrar, sou eu!", e para outra, afirma: "O anfitrião da festa sou eu, fale comigo!". Esse truque cria uma situação em que todos que deveriam se comunicar diretamente passam a depender desse anfitrião enganador, que intercepta todas as conversas.
+```
+Imagine que você está em uma festa cheia de pessoas que não se conhecem bem, e alguém resolve bancar o "anfitrião enganador". Esse anfitrião começa a distribuir informações erradas sobre quem é quem na festa. Para uma pessoa, ele diz: "O fulano ali, que você está tentando encontrar, sou eu!", e para outra, afirma: "O anfitrião da festa sou eu, fale comigo!". Esse truque cria uma situação em que todos que deveriam se comunicar diretamente passam a depender desse anfitrião enganador, que intercepta todas as conversas. 
 
-No ARP Cache Poisoning, o processo é semelhante. O atacante envia mensagens falsas para o roteador e a vítima usando o protocolo ARP. Para o roteador, diz: "O IP da vítima está associado ao meu MAC", e para a vítima, "O IP do roteador está associado ao meu MAC". Como o ARP não verifica a veracidade dessas informações, ambos passam a direcionar seus dados para o MAC do atacante. Dessa forma, o atacante se coloca no meio da comunicação, podendo interceptar, alterar ou até bloquear os pacotes de dados.`
+No ARP Cache Poisoning, o processo é semelhante. O atacante envia mensagens falsas para o roteador e a vítima usando o protocolo ARP. Para o roteador, diz: "O IP da vítima está associado ao meu MAC", e para a vítima, "O IP do roteador está associado ao meu MAC". Como o ARP não verifica a veracidade dessas informações, ambos passam a direcionar seus dados para o MAC do atacante. Dessa forma, o atacante se coloca no meio da comunicação, podendo interceptar, alterar ou até bloquear os pacotes de dados.
+```
+
+
+**OBSERVAÇÃO**: Para o código funcionar, você deve estar com o encaminhamento de pacotes do seu OS ligado. No Windows, basta ligar o `hotspot móvel`. No Linux, você deve executar o seguinte comando no terimnal:
+
+```bash
+sudo -i
+echo i > /proc/sys/net/ipv4/ip_forward
+```
 
 ### Explorando o código
 
@@ -403,6 +413,287 @@ Testou-se para IPs de máquinas alvos na rede local. Depois de muitos erros e co
 
 Pronto! Agora temos um Envenenador ARP funcional. Agora, encontraremos uma forma de tratar o arquivo `pcap`!
 
-### 
+### Processamento de pcap
 
+É possível abrir e interpretar pacotes `pcap` através de softwares de rede, como o Wireshark. Contudo, faremos um código um pouco fora do convenvional, que na verdade, usando o OpenCV (ferramenta de visão computacional), visualizar imagens e, quem sabe, até realizar reconhecimento facial de imagens em tempo real.
 
+Neste exemplo, faremos as duas coisas: extrairemos imagens do tráfego HTTP e detectaremos rostos nessas imagens.
+
+O primeiro arquivo que faremos será o `recapper.py` que analisa um arquivo pcap para achar imagens nos fluxos contidos no pcap e as grava no disco.
+
+O segundo arquivo que faremos será o `detector.py` que analisa cada um desses arquivos de imagem para determinar se contém um rosto. Se contiver, ele grava a imagem no disco com um retângulo ao redor do rosto.
+
+Para o `recapper.py`, começaremos criando uma estrutura do tipo `namedtuple`, que possui campos acessíveis por meio de pesquisa de atributos. Basicamente funciona como uma `tupla` normal, mas com nomes ao invés de números para as posições. Ex:
+
+```py
+# Tupla normal:
+point = (1.1, 5)
+print(point[0], point[1])
+
+# Namedtuple
+Point = namedtuple('Point', ['x', 'y'])
+p = Point(1.1, 5)
+print(p.x, p.y)
+```
+
+Criaremos uma `Response`, que terá um `header` e um `payload`. Em `recapper.py`:
+
+```py
+# Imports do que será usado
+from scapy.all import TCP, rdpcap
+# Collections contém a namedtuple
+import collections
+import os
+import re
+import sys
+import zlib
+
+# Procura o Output Directory, ajustei para o próprio diretório de execução
+OUTDIR = os.path.dirname(os.path.realpath(__file__))
+
+# Gera o caminho para o diretório do pcaps, que está no próprio diretório de execuçao
+if os.name == 'nt':
+    PCAPS = OUTDIR + '\\pcaps'
+else:
+    PCAPS = OUTDIR + '/pcaps'
+    
+# Tupla da Response
+Response = collections.namedtuple('Response', ['header', 'payload'])
+
+# Abstração de get_header, para obter o cabeçalho do pacote
+def get_header(payload):
+    pass
+
+# Abstração de extract_content, para obter os conteúdos do pacote
+def extract_content(Response, content_name='image'):
+    pass
+
+# Classe do Recapper
+class Recapper:
+    # Construtor com o file_name do pcap a ser analisado
+    def __init__(self, fname):
+        pass
+
+    # Abstração da criação da lista de respostas
+    def get_responses(self):
+        pass
+    
+    # Abstração da escrita da imagem
+    def write(self, content_name):
+        pass
+    
+if __name__ == '__main__':
+    # Execução da main: Pega o local o pcap, cria o Recapper com ele, pega as responses e escreve os que forem imagens
+    pfile = os.path.join(PCAPS, 'teste.pcap')
+    recapper = Recapper(pfile)
+    recapper.get_responses()
+    recapper.write('image')
+```
+
+Agora, criando as lógicas das funções:
+
+```py
+# Importação das bibliotecas
+from scapy.all import TCP, rdpcap  # Importa a classe TCP e a função para leitura de arquivos PCAP
+import collections  # Permite criar namedtuples para representar dados estruturados
+import os  # Usado para manipular caminhos e diretórios
+import re  # Usado para trabalhar com expressões regulares, especialmente na extração de dados
+import sys  # Usado para interagir com o sistema, principalmente para escrita no terminal
+import zlib  # Usado para descompressão de dados compactados (gzip e deflate)
+
+# Define o diretório de saída como o mesmo onde o script está localizado
+OUTDIR = os.path.dirname(os.path.realpath(__file__))
+
+# Define o diretório onde os arquivos PCAP devem estar localizados
+# Distinção entre sistemas Windows (usa barras invertidas) e Unix/Linux (usa barras normais)
+if os.name == 'nt':
+    PCAPS = OUTDIR + '\\pcaps'
+else:
+    PCAPS = OUTDIR + '/pcaps'
+
+# Criação de um objeto chamado "Response" usando namedtuple para armazenar dados de resposta HTTP
+# Ele contém dois campos: 'header' (os cabeçalhos HTTP) e 'payload' (os dados do corpo da resposta)
+Response = collections.namedtuple('Response', ['header', 'payload'])
+
+# Função para extrair o cabeçalho HTTP do payload recebido
+def get_header(payload):
+    try:
+        # Encontra o fim do cabeçalho HTTP, identificado pela sequência '\r\n\r\n'
+        # Inclui dois caracteres adicionais após o cabeçalho para garantir a captura completa
+        header_raw = payload[:payload.index(b'\r\n\r\n')+2]
+    except ValueError:
+        # Caso não encontre um cabeçalho válido, imprime '-' no terminal e retorna None
+        sys.stdout.write('-')
+        sys.stdout.flush()
+        return None
+    
+    # Usa expressões regulares para extrair pares chave-valor do cabeçalho (ex.: 'Content-Type: text/html')
+    header = dict(re.findall(r'(?P<name>.*?): (?P<value>.*?)\r\n', header_raw.decode()))
+    
+    # Verifica se o cabeçalho possui a chave 'Content-Type', essencial para identificar o tipo de conteúdo
+    if 'Content-Type' not in header:
+        return None
+    
+    return header
+
+# Função para extrair o conteúdo do payload HTTP com base no tipo de conteúdo (ex.: imagem)
+def extract_content(Response, content_name='image'):
+    content, content_type = None, None  # Inicializa as variáveis para o conteúdo e seu tipo
+    
+    # Verifica se o tipo de conteúdo no cabeçalho contém o nome especificado (ex.: 'image')
+    if content_name in Response.header['Content-Type']:
+        # Obtém a extensão do tipo de conteúdo (ex.: 'jpeg' em 'image/jpeg')
+        content_type = Response.header['Content-Type'].split('/')[1]
+        
+        # Extrai o corpo da resposta (após '\r\n\r\n') como o conteúdo relevante
+        content = Response.payload[Response.payload.index(b'\r\n\r\n')+4:]
+        
+        # Verifica se o conteúdo está compactado e o descompacta
+        if 'Content-Encoding' in Response.header:
+            if Response.header['Content-Encoding'] == 'gzip':
+                # Descompactação para gzip
+                content = zlib.decompress(Response.payload, zlib.MAX_WBITS | 32)
+            elif Response.header['Content-Encoding'] == 'deflate':
+                # Descompactação para deflate
+                content = zlib.decompress(Response.payload)
+    
+    return content, content_type
+
+# Classe principal para analisar capturas de pacotes (arquivos PCAP)
+class Recapper:
+    def __init__(self, fname):
+        # Lê o arquivo PCAP usando a função rdpcap do Scapy
+        pcap = rdpcap(fname)
+        
+        # Organiza os pacotes em sessões, agrupando por conexões (ex.: cliente-servidor)
+        self.sessions = pcap.sessions()
+        
+        # Inicializa uma lista para armazenar as respostas HTTP
+        self.responses = list()
+    
+    # Método para processar as sessões e extrair respostas HTTP
+    def get_responses(self):
+        for session in self.sessions:  # Itera por cada sessão capturada
+            payload = b''  # Inicializa o payload acumulado como vazio
+            
+            # Itera por todos os pacotes da sessão
+            for packet in self.sessions[session]:
+                try:
+                    # Verifica se o pacote está relacionado à porta 80 (HTTP)
+                    if packet[TCP].dport == 80 or packet[TCP].sport == 80:
+                        # Extrai e acumula o payload do pacote TCP
+                        payload += bytes(packet[TCP].payload)
+                except IndexError:
+                    # Marca pacotes inválidos (sem camada TCP) com 'x' no terminal
+                    sys.stdout.write('x')
+                    sys.stdout.flush()
+            
+            # Após processar a sessão, tenta extrair o cabeçalho HTTP do payload acumulado
+            if payload:
+                header = get_header(payload)
+                if header is None:  # Ignora se não encontrar um cabeçalho válido
+                    continue
+                
+                # Adiciona a resposta HTTP (cabeçalho e payload) à lista de respostas
+                self.responses.append(Response(header=header, payload=payload))
+    
+    # Método para salvar o conteúdo extraído das respostas HTTP
+    def write(self, content_name):
+        for i, response in enumerate(self.responses):  # Itera pelas respostas coletadas
+            # Extrai o conteúdo e o tipo do conteúdo (ex.: 'image/jpeg')
+            content, content_type = extract_content(response, content_name)
+            
+            if content and content_type:  # Verifica se há conteúdo válido a ser salvo
+                # Gera um nome de arquivo com base no índice da resposta e no tipo do conteúdo
+                fname = os.path.join(OUTDIR, f'ex_{i}.{content_type}')
+                
+                # Exibe no terminal uma mensagem indicando o arquivo que será salvo
+                print(f'Salvando {fname}')
+                
+                # Salva o conteúdo em um arquivo no disco
+                with open(fname, 'wb') as f:
+                    f.write(content)
+
+# Ponto de entrada principal do script
+if __name__ == '__main__':
+    # Define o caminho para o arquivo PCAP a ser processado
+    pfile = os.path.join(PCAPS, 'teste2.pcap')
+    
+    # Cria uma instância da classe Recapper, passando o arquivo PCAP como argumento
+    recapper = Recapper(pfile)
+    
+    # Coleta respostas HTTP do arquivo PCAP
+    recapper.get_responses()
+    
+    # Escreve o conteúdo do tipo 'image' em arquivos locais
+    recapper.write('image')
+```
+
+**OBSERVAÇÃO**: As imagens só são visualizadas no tráfego se a conexão for HTTP (não HTTPS, pois este tipo de conexão possui TLS - Transport Layer Security - para encriptar os dados). Usaremos o site `http://vis-www.cs.umass.edu/lfw/` para testes com imagens de rostos
+
+Para a próxima etapa, caso se use o Linux, é necessário instale o OpenCV através de:
+
+```bash
+apt-get install libopencv-dev python3-opencv python3-numpy python3-scipy
+```
+
+Para instalar o OpenCV no Windows, podemos usar também: `pip install opencv-python` 
+
+Agora, vamos ao `detector.py`:
+
+```py
+# Import do OpenCV
+import cv2
+import os
+
+# Procura os diretórios faces, train e download, na pasta de execução. As imagens a serem analisadas devem estar em ./downloads
+ROOT = os.path.dirname(os.path.realpath(__file__))
+
+if os.name == 'nt':
+    FACES = ROOT + '\\faces'
+    TRAIN = ROOT + '\\train'
+    IMAGES = ROOT + '\\download'
+else:
+    FACES = ROOT + '/faces'
+    TRAIN = ROOT + '/train'
+    IMAGES = ROOT + '/download'
+    
+def detect(srcdir=IMAGES, tgtdir=FACES, traindir=TRAIN):
+    for fname in os.listdir(srcdir):
+        # Procura imagens no diretório que sejam .jpeg
+        if not fname.upper().endswith('.JPEG'):
+            continue
+        # Nomes das imagens no diretório
+        fullname = os.path.join(srcdir, fname)
+        newname = os.path.join(tgtdir, fname)
+        img = cv2.imread(fullname)
+        if img is None:
+            continue
+        
+        # Não entendi como funcionam bem, realmente. Coisa de IA
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        training = os.path.join(traindir, 'haarcascade_frontalface_alt.xml')    # Arquivo de treino. Não sei como funciona
+        cascade = cv2.CascadeClassifier(training)
+        rects = cascade.detectMultiScale(gray, 1.3, 5)
+        try:
+            # Procura os rostos, se encontrar adiciona aos já encontrados
+            if rects.any():
+                print('Rosto encontrado')
+                rects[:, 2:] += rects[:, :2]
+        except AttributeError:
+            print(f'Nenhum rosto encontrado em {fname}')
+            continue
+        # Desenha o retangulo 
+        for x1, y1, x2, y2 in rects:
+            cv2.rectangle(img, (x1, y1), (x2, y2), (127, 255, 0), 2)
+        cv2.imwrite(newname, img)
+        
+if __name__ == '__main__':
+    detect()
+```
+
+Confesso que não procurei entender muito o código, pois envolve conhecimentos de ML. Contudo, pelo menos agora temos como identificar rostos em requisições HTTP de imagens!
+
+### Explorando o código
+
+Os códigos foram testados e foram um sucesso!
