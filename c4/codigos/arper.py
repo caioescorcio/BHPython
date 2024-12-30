@@ -32,7 +32,7 @@ class Arper:
         poison_thread = Process(target=self.poison, args=(self.stop_event,))
         poison_thread.start()
         
-        sniff_thread = Process(target=self.sniff, args=(10,))
+        sniff_thread = Process(target=self.sniff, args=(200,))
         sniff_thread.start()
         
         poison_thread.join()
