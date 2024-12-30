@@ -5,8 +5,6 @@ import os
 import sys
 import time
 
-is_done = False
-
 def get_mac(target_ip):
     packet = Ether(dst='ff:ff:ff:ff:ff:ff')/ARP(op='who-has', pdst=target_ip)
     resp, _ = srp(packet, timeout=2, verbose=False)
@@ -115,6 +113,9 @@ class Arper:
 
     
 if __name__ == '__main__':
+    if len(sys.argv) != 4:
+        print("*** Envenenamento ARP ***\n Como usar: \n\n arper.py [IP VITIMA] [IP GATEWAY] [INTEFACE]")
+        sys.exit()
     (victim, gateway, interface) = (sys.argv[1], sys.argv[2], sys.argv[3])
     myarp = Arper(victim, gateway, interface)
     myarp.run()
