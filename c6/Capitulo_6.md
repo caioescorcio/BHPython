@@ -319,3 +319,328 @@ O output mostrado foi:
 ![burp_ex7](../imagens/burp_ex7.png)
 
 Mostrando que o site é vulnerável a SQL injection.
+
+
+### Utilizando o Bing no Burp
+
+A inspiração para essa parte é de que o Bing possui funcionalidades de pesquisa de todos os hosts que possuem o mesmo endereço de IP, ao usar o modificador de pesquisa "IP", bem como todos os subdomínios de um domínio, ao usar o modificador de pesquisa "domínio". Não sabia disso pq eu não uso o Bing.
+
+Agora podemos usar um [*scraper*](https://pt.wikipedia.org/wiki/Web_scraping) para enviar consultas no Bing e obter o HTML dos resultados. *Web scraping* ou só *scraping* é a definição para a extração de dados de brutos de um site para uma análise estruturada. 
+
+Os autores mencionam que, para evitar problemas, é melhor usarmos a API do Bing para enviar as consultas automatizadas e analisar os resultados. Ela se encontra no seguinte [link](https://www.microsoft.com/en-us/bing/apis/bing-web-search-api).
+
+Para utilizá-la é necessário fazer login com a sua conta Microsoft e na Azure, colocar dados do cartão de crédito etc. Não vou fazer isso, então esse código não vai ser testado do jeito que os autores fizeram.
+
+No entanto, nada nos impede de criar a extensão para o Burp, usando os mesmos princípios da anterior. Criaremos uma extensão para enviar consultas automatizadas e, para isso, usaremos um *menu de contexto*, usado para apresentar a interface de pesquisa. Então, em `burp_bing.py`:
+
+```py
+# Importações necessárias para integrar o Burp Suite e usar a API do Bing.
+from burp import IBurpExtender  # Interface para criar extensões no Burp Suite.
+from burp import IContextMenuFactory  # Interface para adicionar itens ao menu de contexto.
+
+from java.net import URL  # Classe Java para manipular URLs.
+from java.util import ArrayList  # Estrutura de dados para listas.
+from javax.swing import JMenuItem  # Item de menu usado na GUI.
+from thread import start_new_thread  # Para criar threads (executar tarefas em paralelo).
+
+import json  # Para manipular dados JSON.
+import socket  # Para operações de rede, como resolver nomes de domínio.
+import urllib  # Para codificar parâmetros de consulta em URLs.
+
+# Configurações para acessar a API do Bing.
+API_KEY = 'SUA CHAVE DA API'  # Chave da API obtida no portal da Azure.
+API_HOST = 'api.cognitive.microsoft.com'  # Host para enviar as requisições à API do Bing.
+
+# Classe principal da extensão, implementando as interfaces necessárias.
+class BurpExtenser(IBurpExtender, IContextMenuFactory):
+    def registerExtenderCallbacks(self, callbacks):
+        """
+        Método chamado pelo Burp Suite para registrar a extensão.
+        """
+        self._callbacks = callbacks  # Referência para os métodos do Burp.
+        self._helpers = callbacks.getHelpers()  # Auxiliares para manipular HTTP e outros dados.
+        self.context = None  # Armazenará o contexto do menu clicado.
+
+        # Configuração inicial da extensão no Burp Suite.
+        callbacks.setExtensionName("BHP Bing")  # Nome da extensão.
+        callbacks.registerContextMenuFactory(self)  # Registra o menu de contexto.
+
+        return
+    
+    def createMenuItems(self, context_menu):
+        """
+        Método para criar itens no menu de contexto.
+        """
+        self.context = context_menu  # Salva o contexto do clique.
+        menu_list = ArrayList()  # Lista de itens para o menu.
+        menu_list.add(JMenuItem(
+            "Send to Bing", actionPeformed=self.bing_menu))  # Adiciona o item "Send to Bing".
+        return menu_list
+    
+    def bing_menu(self, event):
+        """
+        Método chamado quando o item "Send to Bing" é selecionado.
+        """
+        # Obtém as mensagens HTTP selecionadas pelo usuário.
+        http_traffic = self.context.getSelectedMessages()
+        print("%d solicitações destacadas" % len(http_traffic))  # Exibe o número de seleções.
+
+        for traffic in http_traffic:
+            http_service = traffic.getHttpService()  # Detalhes do serviço HTTP.
+            host = http_service.getHost()  # Obtém o host associado à mensagem.
+            print("Host escolhido pelo usuário: %s" % host)  # Loga o host selecionado.
+            self.bing_search(host)  # Realiza a busca no Bing para o host.
+        
+        return
+    
+    def bing_search(self, host):
+        """
+        Realiza uma pesquisa no Bing para o host selecionado.
+        """
+        # Verifica se o host é um IP ou um nome de domínio.
+        try:
+            is_ip = bool(socket.inet_aton(host))  # Tenta converter para IP.
+        except socket.error:
+            is_ip = False  # Não é um IP válido.
+        
+        if is_ip:
+            ip_address = host  # O host é um IP.
+            domain = False  # Não é um domínio.
+        else:
+            ip_address = socket.gethostbyname(host)  # Resolve o IP a partir do domínio.
+            domain = True  # É um domínio.
+
+        # Cria threads para realizar consultas separadas para IP e domínio.
+        start_new_thread(self.bing_query, ('ip:%s' % ip_address,))
+        if domain:
+            start_new_thread(self.bing_query, ('domain:%s' % host,))
+    
+    def bing_query(self, bing_query_string):
+        """
+        Realiza a consulta à API do Bing e processa os resultados.
+        """
+        print('Realizando pesquisa no Bing: %s' % bing_query_string)
+        # Cria a requisição HTTP.
+        http_request = 'GET https://%s/bing/v7.0/search?' % API_HOST
+        http_request += 'q=%s HTTP/1.1\r\n' % urllib.quote(bing_query_string)  # Codifica a consulta.
+        http_request += 'Host: %s\r\n' % API_HOST
+        http_request += 'Connection:close\r\n'
+        http_request += 'Ocp-Apim-Subscription-Key: %s\r\n' % API_KEY  # Cabeçalho com a chave da API.
+        http_request += 'User-Agent: Black Hat Python\r\n'
+
+        # Envia a requisição usando os métodos do Burp e obtém a resposta.
+        json_body = self._callbacks.makeHttpRequest(
+            API_HOST, 443, True, http_request).toString()
+        json_body = json_body.split('\r\n\r\n', 1)[1]  # Divide cabeçalhos e corpo da resposta.
+
+        try:
+            response = json.loads(json_body)  # Tenta carregar a resposta como JSON.
+        except (TypeError, ValueError) as err:
+            print('O Bing não retornou nenhum resultado: %s' % err)  # Erro ao processar a resposta.
+        else:
+            sites = list()
+            if response.get('webPages'):
+                sites = response['webPages']['value']  # Extrai os resultados relevantes.
+            if len(sites):
+                # Exibe e processa cada resultado.
+                for site in sites:
+                    print('*' * 100)
+                    print('Nome: %s         ' % site['name'])
+                    print('URL: %s          ' % site['url'])
+                    print('Descrição: %r    ' % site['snippet'])
+                    print('*' * 100)
+
+                    java_url = URL(site['url'])  # Cria um objeto URL.
+                    if not self._callbacks.isInScope(java_url):
+                        print('Adicionando %s ao escopo do Burp' % site['url'])
+                        self._callbacks.includeInScope(java_url)  # Adiciona ao escopo do Burp.
+            else:
+                print('O Bing retornou uma resposta vazia: %s' % bing_query_string)
+        
+        return
+```
+
+Ele basicamente adiciona uma nova opção ao menu de contexto (pequeno menu ao clicar com o botão direito)
+
+### Explorando o código
+
+Como afirmei antes, não me interessei em testá-lo, pois envolvia criar uma conta na Azure e colocar meu cartão de crédito. Mas sinta-se livre para testar, já que os autores testaram e deu certo. Os prints aparecem no menu de Extensão e, no menu Target > Scope, aparecem os hosts.
+
+### Transformando conteúdo de sites em senhas valiosas
+
+A inspiração para esse código é criar uma wordlist personalizada, usando o scraping do site, para enventuais senhas a serem bruteforçadas.
+
+Seguindo a mesma lógica do `IContextMenu`, criaremos uma opção de *clique com o botão direito* para colher as strings relevantes de um site para usar em uma wordlist. Em `burp_scrap.py`:
+
+**OBSERVAÇÃO**: Eu useri um `pip install htmlparser` por fins de ajuda a codar.
+
+```py
+# Importações necessárias para criar uma extensão no Burp Suite.
+from burp import IBurpExtender  # Interface para criar extensões.
+from burp import IContextMenuFactory  # Interface para adicionar itens ao menu de contexto.
+
+# Importações para manipulação de menus e estruturas de dados no Java.
+from java.util import ArrayList  # Lista dinâmica usada no Java.
+from javax.swing import JMenuItem  # Item do menu que será exibido no Burp Suite.
+
+# Importações para processamento de texto e manipulação de HTML.
+from datetime import datetime  # Para trabalhar com datas.
+from HTMLParser import HTMLParser  # Classe para remover tags HTML do conteúdo.
+
+import re  # Biblioteca para expressões regulares.
+
+# Classe personalizada para remover tags HTML e extrair texto visível.
+class TagStripper(HTMLParser):
+    def __init__(self):
+        """
+        Inicializa o parser HTML e uma lista para armazenar o texto extraído.
+        """
+        HTMLParser.__init__(self)  # Chama o inicializador da classe base.
+        self.page_text = []  # Lista que armazenará os dados extraídos.
+
+    def handle_data(self, data):
+        """
+        Método chamado para processar o texto encontrado entre as tags.
+        """
+        self.page_text.append(data)  # Adiciona o texto à lista.
+
+    def handle_comment(self, data):
+        """
+        Método chamado para processar comentários HTML.
+        """
+        self.page_text.append(data)  # Adiciona os comentários à lista.
+
+    def strip(self, html):
+        """
+        Método que processa o HTML fornecido e retorna o texto limpo.
+        """
+        self.feed(html)  # Processa o HTML.
+        return " ".join(self.page_text)  # Retorna todo o texto como uma única string.
+
+# Classe principal da extensão, implementando as interfaces necessárias.
+class BurpExtender(IBurpExtender, IContextMenuFactory):
+    def registerExtenderCallbacks(self, callbacks):
+        """
+        Método chamado pelo Burp Suite para registrar a extensão.
+        """
+        self._callbacks = callbacks  # Referência para métodos do Burp Suite.
+        self._helpers = callbacks.getHelpers()  # Auxiliares para manipulação de dados.
+        self.context = None  # Armazenará o contexto do menu de clique.
+        self.hosts = set()  # Conjunto para armazenar os hosts processados.
+
+        # Inicia a wordlist com uma palavra comum.
+        self.wordlist = set(["senha"])
+
+        # Configurações iniciais da extensão.
+        callbacks.setExtensionName("BHP Wordlist")  # Define o nome da extensão.
+        callbacks.registerContextMenuFactory(self)  # Registra o menu de contexto.
+
+    def createMenuItems(self, context_menu):
+        """
+        Método para criar itens no menu de contexto.
+        """
+        self.context = context_menu  # Salva o contexto do clique.
+        menu_list = ArrayList()  # Lista de itens do menu.
+        # Adiciona o item "Create Wordlist" ao menu.
+        menu_list.add(JMenuItem("Create Wordlist", actionPerformed=self.wordlist_menu))
+        return menu_list
+
+    def wordlist_menu(self, event):
+        """
+        Método chamado quando "Create Wordlist" é clicado no menu.
+        """
+        # Obtém as mensagens HTTP selecionadas pelo usuário.
+        http_traffic = self.context.getSelectedMessages()
+
+        for traffic in http_traffic:
+            http_service = traffic.getHttpService()  # Detalhes do serviço HTTP.
+            host = http_service.getHost()  # Obtém o host associado à mensagem.
+            self.hosts.add(host)  # Adiciona o host à lista de hosts processados.
+
+            http_response = traffic.getResponse()  # Obtém a resposta HTTP.
+            if http_response:
+                self.get_words(http_response)  # Extrai palavras da resposta.
+
+        self.display_wordlist()  # Exibe a wordlist gerada.
+        return
+
+    def get_words(self, http_response):
+        """
+        Extrai palavras úteis do corpo da resposta HTTP.
+        """
+        # Divide a resposta em cabeçalhos e corpo.
+        headers, body = http_response.tostring().split('\r\n\r\n', 1)
+
+        # Ignora respostas que não são textuais.
+        if headers.lower().find("content-type: text") == -1:
+            return
+
+        # Remove tags HTML do corpo da resposta.
+        tag_stripper = TagStripper()
+        page_text = tag_stripper.strip(body)
+
+        # Encontra palavras com pelo menos 3 caracteres usando regex.
+        words = re.findall("[a-zA-Z]\w{2,}", page_text)
+
+        for word in words:
+            # Filtra palavras com no máximo 12 caracteres.
+            if len(word) <= 12:
+                self.wordlist.add(word.lower())  # Adiciona as palavras à wordlist.
+
+        return
+
+    def mangle(self, word):
+        """
+        Modifica as palavras para gerar variações comuns de senhas.
+        """
+        year = datetime.now().year  # Obtém o ano atual.
+        suffixes = ["", "1", "!", year]  # Sufixos comuns para senhas.
+        mangled = []  # Lista para armazenar as variações.
+
+        # Gera variações com a palavra original e a palavra capitalizada.
+        for password in (word, word.capitalize()):
+            for suffix in suffixes:
+                mangled.append("%s%s" % (password, suffix))  # Adiciona a variação.
+
+        return mangled
+
+    def display_wordlist(self):
+        """
+        Exibe a wordlist gerada no console do Burp Suite.
+        """
+        # Imprime um cabeçalho com os hosts processados.
+        print("#!comment: lista BHP Wordlist para o(s) site(s) %s" % ", ".join(self.hosts))
+
+        # Imprime as palavras da wordlist com variações geradas.
+        for word in sorted(self.wordlist):
+            for password in self.mangle(word):
+                print(password)  # Exibe cada variação no console.
+
+        return
+```
+
+Pronto! Agora podemos gerar wordlists com base em strings de um site!
+
+### Explorando o código
+
+Depois de adicioná-lo às extensões, como feito para os códigos anteriores, vamos para a tela de Dashboard > Tasks > New Live Task:
+
+![burp_task](../imagens/burp_ex8.png)
+
+Nela, selecionaremos a opção *Add all links observed in traffic through Proxy to site map* e clicaremos em Save:
+
+![burp_task1](../imagens/burp_ex9.png)
+
+Agora, iremos para a aba Target e iniciaremos o navegador. Para o exemplo usaremos o mesmo site do primeiro exemplo: *http://testphp.vulnweb.com/*. Ao abrir o navegador, copie e cole o link.
+
+![burp_task2](../imagens/burp_ex10.png)
+
+Em seguida, aparecerão diversos links na aba Site Map. Ctrl+A para selecionar todos e clique com o botão direito. Extensions > BHP Wordlist > Create Wordlist.
+
+![burp_task3](../imagens/burp_ex11.png)
+
+Finalmente, veremos a wordlist printada na aba Extension, no Output do nosso BHP Wordlist:
+
+![burp_task4](../imagens/burp_ex12.png)
+
+**OBSERVAÇÃO**: Não coloque dígitos com acentos, cedilha ou outros caracteres que não estão nos ASCII para inglês, nem nos comentários. Isso impede a compilação correta do código. É possível usar as funções `file` do Python 2 para colocar a wordlist em um arquivo separado.
