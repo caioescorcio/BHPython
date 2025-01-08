@@ -6,6 +6,8 @@ __pycache__/
 *.pcap
 # C extensions
 *.so
+*.pri
+*.pub
 
 # Distribution / packaging
 .Python
