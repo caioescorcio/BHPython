@@ -8,6 +8,8 @@ __pycache__/
 *.so
 *.pri
 *.pub
+*.csv
+*.pdf
 
 # Distribution / packaging
 .Python
