@@ -14,3 +14,6 @@ Em cada capítulo ou subcapítulo existirão pastas que abordarão conceitos e m
 ```
 
 Para a "criação de um novo capítulo" execute o `novo_capitulo.bat`. Eventualmente podem existir alguns `.md` a mais e outras divisões dentro de `.\codigos`, mas isso era previsto dada a densidade do livro.
+
+
+**OBSERVAÇÃO**: Este repositório abrange todos os capítulos do livro. Contudo, no capítulo 11 (final), era preciso ter uma VM do Windows instalada e não consegui, por falta de alguns recursos, usá-la. Logo não foi feito um estudo de qualidade sobre o que o capítulo aborda. Fica apenas o Markdown de referência e o próprio livro.
